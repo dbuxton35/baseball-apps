@@ -1,0 +1,678 @@
+library(shiny)
+library(dplyr)
+library(DT)
+library(ggplot2)
+library(gt)
+library(scales)
+library(shinyWidgets)
+library(tidyverse)
+library(readr)
+library(pitchRx)
+library(cowplot)
+library(gtsummary)
+library(ggrepel)
+library(lubridate)
+
+Game_File <- read.csv("COMPLETEDATA.csv")
+
+#Filter data to only include GMU players on the team
+Game_File$PitcherTeam <- (ifelse(
+  (Game_File$Pitcher %in% c('Gartland, Chad', 'Yount, Britt', 'Martins, Nick',
+                           'Uchman, Ty', 'Edmonds, Ryan', 'Menaker, Kyle',
+                           'Mabe, Avery', 'Ertel, Brant', 'Hueber, Toby',
+                           'Eaton, Konner', 'Stewart, Owen', 'Okeefe, Shaun',
+                           'Herkey, Tyler', 'Roberti, Jake', 'Rumberg, Logan',
+                           'Egan, Cole', 'Knox, Connor', 'Goodyear, Luke',
+                           'McCarthy, Dylan', 'Peterson, Ryan')),
+  'GEO_PAT',
+  'NOT_GMU'
+))
+
+Game_File$BatterTeam <- (ifelse(
+  (Game_File$Batter %in% c('Shealor, Bennett', 'Williams, Jp', 'Dykstra, Connor',
+                          'Bardatsos, Socrates', 'Trimble, South', 'Pracht, Carsen',
+                          'Blanchard, Evan', 'Feldman, Cole', 'Butler, Jake',
+                          'Carver, Christian', 'Hull, Owen', 'Martin, AJ',
+                          'Smith, Jordan', 'Woody, Reece', 'Wood, Derek',
+                          'Muskopf, Ryan', 'Kozlowski, Jake', 'Parks, Brandon',
+                          'Quinn-Irons, James', 'Hueber, Toby')),
+  'GEO_PAT',
+  'NOT_GMU'
+))
+
+
+Game_File <- Game_File %>% 
+  filter(BatterTeam == "GMU_PAT" | BatterTeam == "GEO_PAT") %>% 
+  mutate(RelHeight = substr(RelHeight, 1, nchar(RelHeight)), 
+         RelHeight = as.double(RelHeight),
+         Balls = substr(Balls, 1, nchar(Balls)), 
+         Balls = as.double(Balls),
+         Strikes = substr(Strikes, 1, nchar(Strikes)), 
+         Strikes = as.double(Strikes))
+BACON <- read.csv("xwOBAcon.csv")
+umpire_data <- read_csv("called_strike.csv")
+
+
+Game_File$Count <- paste(Game_File$Balls, Game_File$Strikes, sep = "-")
+
+# Checks and CSV adjustments
+ChecksCSV <- Game_File %>%
+  mutate(HCheck = case_when(PlayResult %in% c('Single', 'Double', 'Triple', 'HomeRun') ~ TRUE, TRUE ~ FALSE),
+         GBCheck = case_when(TaggedHitType %in% c('GroundBall') ~ TRUE, TRUE ~ FALSE),
+         BBECheck = case_when(TaggedHitType %in% c('GroundBall', 'LineDrive', 'FlyBall', 'Popup') ~ TRUE, TRUE ~ FALSE), 
+         SwingCheck = case_when(PitchCall %in% c('FoulBall', 'StrikeSwinging','InPlay') ~ TRUE, TRUE ~ FALSE),
+         WhiffCheck = case_when(PitchCall %in% c('StrikeSwinging') ~ TRUE, TRUE ~ FALSE),
+         CSWCheck = case_when(PitchCall %in% c('StrikeSwinging','StrikeCalled') ~ TRUE, TRUE ~ FALSE),
+         StrikeCheck = case_when(PitchCall %in% c('StrikeSwinging', 'FoulBall', 'InPlay','StrikeCalled') ~ TRUE, TRUE ~ FALSE),
+         ZoneCheck = case_when(between(PlateLocHeight, 1.59, 3.41) & between(PlateLocSide, -1, 1) ~ TRUE, TRUE ~ FALSE),
+         SweetSpotCheck = case_when(between(Angle, 10, 30) ~ TRUE, TRUE ~ FALSE),
+         HardHitCheck = case_when(between(ExitSpeed, 95, 120) ~ TRUE, TRUE ~ FALSE),
+         BarrelCheck = case_when(between(Angle, 10, 30)  & between(ExitSpeed, 95, 120) ~ TRUE, TRUE ~ FALSE),
+         WhiffCheck = case_when(PitchCall %in% c('StrikeSwinging') ~ TRUE, TRUE ~ FALSE),
+         SwingCheck = case_when(PitchCall %in% c('StrikeSwinging', 'InPlay','FoulBall') ~ TRUE, TRUE ~ FALSE),
+         CalledStrikeCheck = case_when(PitchCall %in% c('StrikeCalled') ~ TRUE, TRUE ~ FALSE),
+         BallCheck = case_when(PitchCall %in% c('BallCalled', 'HitByPitch') ~ TRUE, TRUE ~ FALSE),
+         FoulCheck = case_when(PitchCall %in% c('FoulBall') ~ TRUE, TRUE ~ FALSE),
+         SingleCheck = case_when(PlayResult %in% c('Single') ~ TRUE, TRUE ~ FALSE),
+         DoubleCheck = case_when(PlayResult %in% c('Double') ~ TRUE, TRUE ~ FALSE),
+         TripleCheck = case_when(PlayResult %in% c('Triple') ~ TRUE, TRUE ~ FALSE),
+         HRCheck = case_when(PlayResult %in% c('HomeRun') ~ TRUE, TRUE ~ FALSE),
+         SacCheck = case_when(PlayResult %in% c('Sacrifice') ~ TRUE, TRUE ~ FALSE),
+         HBPCheck = case_when(PitchCall %in% c('HitByPitch') ~ TRUE, TRUE ~ FALSE),
+         StrikeoutCheck = case_when(KorBB %in% c('Strikeout') ~ TRUE, TRUE ~ FALSE),
+         WalkCheck = case_when(KorBB %in% c('Walk') ~ TRUE, TRUE ~ FALSE),
+         BIPCheck = case_when(PlayResult %in% c('Undefined') ~ FALSE, TRUE ~ TRUE), 
+         ErrorCheck = if_else(PlayResult %in% c('Error'), TRUE, FALSE),
+         ABCheck = StrikeoutCheck + BIPCheck - SacCheck,
+         PACheck = StrikeoutCheck + WalkCheck + HBPCheck + BIPCheck)
+
+BACONCSV <- ChecksCSV %>% 
+  mutate(floorExitSpeed = floor(ExitSpeed),
+         floorLaunchAngle = trunc(Angle),) %>% 
+  left_join(BACON, by = c("floorExitSpeed" = "launch_speed", 
+                          "floorLaunchAngle" = "launch_angle"))
+
+strike_exp_data <- BACONCSV %>%  
+  mutate(RoundedPLH = round(PlateLocHeight, digits = 1),
+         RoundedPLS = round(PlateLocSide, digits = 1)) %>% 
+  left_join(umpire_data, by = c("RoundedPLH" = "PlateLocHeight",
+                                "RoundedPLS" = "PlateLocSide"))
+
+strike_exp_diff <- strike_exp_data %>% 
+  mutate(strike_exp_diff = abs(StrikeCheck - called_strike_prob))
+
+FinalCSV <- strike_exp_diff %>%
+  mutate(across("av_xwOBAcon", ~replace_na(., 0)),
+         across("strike_exp_diff", ~replace_na(., 0)),
+         xwOBAvalues = av_xwOBAcon + WalkCheck * 0.83 + HBPCheck * 0.86 + StrikeoutCheck * 0)
+
+tail(FinalCSV$Date, 150)
+FinalCSV$Date <- parse_date_time(FinalCSV$Date, orders = c('ymd', '%m/%d/%Y'))
+
+FinalCSV$Date <- as.Date(FinalCSV$Date, "%Y-%m-%d")
+
+FinalCSV$GameType <- ifelse(FinalCSV$Batter == "", "Bullpen", "Intersquad")
+
+FinalCSV$CallType <- ifelse(strike_exp_diff$StrikeCheck & !strike_exp_diff$ZoneCheck 
+                            | !strike_exp_diff$StrikeCheck & strike_exp_diff$ZoneCheck, "Incorrect", "Correct")
+
+
+FinalCSV$PitchCount <- 0
+for (i in 1:nrow(FinalCSV)) {FinalCSV$PitchCount[i] <- sum(FinalCSV$Batter[1:i] == FinalCSV$Batter[i])}
+
+# ui
+{ui <- fluidPage(
+  
+  titlePanel("GMU Hitting Data"),
+  br(),
+  sidebarLayout(
+    sidebarPanel(
+      selectInput(inputId = "BatterInput", label = "Select Batter", 
+                  choices = c(All = "All", sort(unique(FinalCSV$Batter)))),
+      dateRangeInput(inputId = "DateRangeInput", label = "Select Date Range", 
+                     start = min(FinalCSV$Date), end = max(FinalCSV$Date)),
+      img(src = "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c0/George_Mason_baseball_logo.svg/1280px-George_Mason_baseball_logo.svg.png", 
+          style = "display: block; margin-left: auto; margin-right: auto;", height = 150, width = 150)),
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Metrics/Results", br(), 
+                 dataTableOutput("summary_table"),
+                 dataTableOutput("Batter_splits_table"), 
+                 dataTableOutput("Batter_summary_table"), 
+                 dataTableOutput("Batter_results_table")),
+        tabPanel("Results By Split", br(), 
+                 dataTableOutput("Batter_count_results"),
+                 dataTableOutput("pitch_type_table")),
+        tabPanel("Heat Maps", br(), 
+                 plotOutput("plot1")),
+        tabPanel("Launch Conditions", br(), 
+                 plotOutput("angle_vs_speed"),
+                 plotOutput("bearing_vs_speed")),
+        tabPanel("Locations", br(), 
+                 plotOutput("pitch_location_plot1"),
+                 plotOutput("pitch_location_plot2"),
+                 plotOutput("pitch_location_plot3")),
+        tabPanel("Game Progression", br(), 
+                 plotOutput("lineplot2"),
+                 plotOutput("lineplot1"), 
+                 plotOutput("lineplot3"), 
+                 plotOutput("lineplot4"))
+      )
+    )
+  )
+)
+}  
+
+server <- function(input, output, session) {
+  
+  observeEvent(input$BatterInput, 
+               updateSelectInput(session, inputId = "GameInput", label = "Select Game/Date:", 
+                                 choices = sort(unique(FinalCSV$Date[FinalCSV$Batter == input$BatterInput]))))
+  
+  output$selected_Batter <- renderText({paste(input$BatterInput)})
+  
+  output$selected_game <- renderText({paste(input$DateRangeInput)})
+  
+  output$summary_table <- renderDataTable({
+    table <- FinalCSV
+    
+    if(input$BatterInput != "All") {
+      table <- table %>% filter(Batter %in% input$BatterInput)
+    }
+    table <- table %>%
+      filter(between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>%
+      summarize('Pitches' = n(),
+                PA = sum(PACheck, na.rm = TRUE), 
+                BBE = sum(BBECheck, na.rm = TRUE),
+                H = sum(HCheck, na.rm = TRUE), 
+                `1B` = sum(SingleCheck, na.rm = TRUE), 
+                `2B` = sum(DoubleCheck, na.rm = TRUE), 
+                `3B` = sum(TripleCheck, na.rm = TRUE), 
+                HR = sum(HRCheck, na.rm = TRUE), 
+                SO = sum(StrikeoutCheck, na.rm = TRUE), 
+                BB = sum(WalkCheck, na.rm = TRUE), 
+                HBP = sum(HBPCheck, na.rm = TRUE),
+                Strikes = sum(StrikeCheck, na.rm = TRUE), 
+                Chases = sum(SwingCheck[ZoneCheck == FALSE], na.rm = TRUE), 
+                Whiffs = sum(WhiffCheck[SwingCheck == TRUE], na.rm = TRUE))
+    
+    table[is.na(table)] <- "-"
+    
+    tableFilter <- reactive({table})
+    datatable(tableFilter(), options = list(dom = 't', columnDefs = list(list(targets = 0, visible = FALSE))))
+  })
+  
+  output$Batter_summary_table <- renderDataTable({
+    table <- FinalCSV
+    
+    if(input$BatterInput != "All") {
+      table <- table %>% filter(Batter %in% input$BatterInput)
+    }
+    table <- table %>%
+      filter(between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>%
+      group_by('Pitch' = TaggedPitchType) %>%
+      summarize('Pitches' = n(), 
+                'AvgEV' = round(mean(ExitSpeed, na.rm = TRUE), 1),
+                'NinetiethEV' = round(quantile(ExitSpeed, na.rm = TRUE, probs = 0.9), 0), 
+                'MaxEV' = round(max(ExitSpeed, na.rm = TRUE), 1), 
+                'AvgLA' = round(median(Angle, na.rm = TRUE), 0)) %>% 
+      mutate(Usage = Pitches / sum(Pitches)) %>% 
+      mutate(Usage = scales::percent(Usage, accuracy = 0.1)) %>%
+      select(Pitch, Pitches, Usage, AvgEV, NinetiethEV, MaxEV, AvgLA)
+    
+    table[is.na(table)] = 0  
+    
+    tableFilter <- reactive({table})
+    datatable(tableFilter(), options = list(dom = 't', columnDefs = list(list(targets = 0, visible = FALSE))))
+  })
+  
+  output$Batter_results_table <- renderDataTable({
+    table <- FinalCSV
+    
+    if(input$BatterInput != "All") {
+      table <- table %>% filter(Batter %in% input$BatterInput)
+    }
+    
+    table <- table %>%
+      filter(between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>%   
+      group_by('Pitch' = TaggedPitchType) %>%
+      summarize('Pitches' = n(),
+                PA = sum(PACheck, na.rm = TRUE), 
+                AB = sum(ABCheck, na.rm = TRUE), 
+                H = sum(HCheck, na.rm = TRUE), 
+                `1B` = sum(SingleCheck, na.rm = TRUE), 
+                `2B` = sum(DoubleCheck, na.rm = TRUE), 
+                `3B` = sum(TripleCheck, na.rm = TRUE), 
+                HR = sum(HRCheck, na.rm = TRUE), 
+                TB = (`1B`) + (`2B` * 2) + (`3B` * 3) + (HR * 4),
+                SO = sum(StrikeoutCheck, na.rm = TRUE), 
+                BB = sum(WalkCheck, na.rm = TRUE), 
+                HBP = sum(HBPCheck, na.rm = TRUE),
+                xwOBA = round(mean(xwOBAvalues[PACheck == TRUE], na.rm = TRUE), 3),
+                `CSW%` = mean(CSWCheck, na.rm = TRUE), 
+                `Strike%` = mean(StrikeCheck, na.rm = TRUE), 
+                `StrikeProb%` = mean(called_strike_prob, na.rm = TRUE),
+                `Zone%` = mean(ZoneCheck, na.rm = TRUE), 
+                `Swing%` = mean(SwingCheck, na.rm = TRUE), 
+                `Chase%` = mean(SwingCheck[ZoneCheck == FALSE], na.rm = TRUE), 
+                `Z-Whiff%` = mean(WhiffCheck[ZoneCheck == TRUE & SwingCheck == TRUE]),
+                `Whiff%` = mean(WhiffCheck[SwingCheck == TRUE], na.rm = TRUE), 
+                `Z-Swing%` = mean(SwingCheck[ZoneCheck == TRUE], na.rm = TRUE),
+                BBE = sum(BBECheck, na.rm = TRUE),
+                xDamage = mean(av_xwOBAcon[BBECheck == TRUE],  na.rm = TRUE),
+                AvgEV = mean(ExitSpeed[BBECheck == TRUE], na.rm = TRUE), 
+                AVG = H / AB,
+                OBP = (H + BB + HBP) / PA,
+                SLG = TB / AB) %>% 
+      mutate(`CSW%` = scales::percent(`CSW%`, accuracy = 0.1),
+             `Strike%` = scales::percent(`Strike%`, accuracy = 0.1),
+             `StrikeProb%` = scales::percent(`StrikeProb%`, accuracy = 0.1),
+             `Zone%` = scales::percent(`Zone%`, accuracy = 0.1),
+             `Chase%` = scales::percent(`Chase%`, accuracy = 0.1),
+             `Whiff%` = scales::percent(`Whiff%`, accuracy = 0.1),
+             `Z-Whiff%` = scales::percent(`Z-Whiff%`, accuracy = 0.1),
+             `Z-Swing%` = scales::percent(`Z-Swing%`, accuracy = 0.1),
+             `Swing%` = scales::percent(`Swing%`, accuracy = 0.1),
+             xDamage = sprintf("%.3f", xDamage),
+             xwOBA = sprintf("%.3f", xwOBA),
+             AvgEV = sprintf("%.1f", AvgEV),
+             AVG = sprintf("%.3f", AVG),
+             OBP = sprintf("%.3f", OBP),
+             SLG = sprintf("%.3f", SLG)) %>% 
+      select(Pitch, Pitches, `CSW%`, `Zone%`, `Chase%`, `Whiff%`, 
+             `Z-Whiff%`, `Z-Swing%`, `Swing%`, xDamage, xwOBA, AvgEV, AVG, SLG)
+    
+    table[is.na(table)] <- "-"
+    
+    tableFilter <- reactive({table})
+    datatable(tableFilter(), options = list(dom = 't', columnDefs = list(list(targets = 0, visible = FALSE))))
+  })
+  
+  output$pitch_type_table <- renderDataTable({
+    table <- FinalCSV
+    
+    if(input$BatterInput != "All") {
+      table <- table %>% filter(Batter %in% input$BatterInput)
+    }
+    table <- table %>%
+      filter(between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>%   
+      group_by('Side' = PitcherThrows,
+               'Pitch' = TaggedPitchType) %>%
+      summarize('Pitches' = n(),
+                PA = sum(PACheck, na.rm = TRUE), 
+                AB = sum(ABCheck, na.rm = TRUE), 
+                H = sum(HCheck, na.rm = TRUE), 
+                `1B` = sum(SingleCheck, na.rm = TRUE), 
+                `2B` = sum(DoubleCheck, na.rm = TRUE), 
+                `3B` = sum(TripleCheck, na.rm = TRUE), 
+                HR = sum(HRCheck, na.rm = TRUE), 
+                TB = (`1B`) + (`2B` * 2) + (`3B` * 3) + (HR * 4),
+                SO = sum(StrikeoutCheck, na.rm = TRUE), 
+                BB = sum(WalkCheck, na.rm = TRUE), 
+                HBP = sum(HBPCheck, na.rm = TRUE),
+                xwOBA = round(mean(xwOBAvalues[PACheck == TRUE], na.rm = TRUE), 3),
+                `CSW%` = mean(CSWCheck, na.rm = TRUE), 
+                `Strike%` = mean(StrikeCheck, na.rm = TRUE), 
+                `StrikeProb%` = mean(called_strike_prob, na.rm = TRUE),
+                `Zone%` = mean(ZoneCheck, na.rm = TRUE), 
+                `Swing%` = mean(SwingCheck, na.rm = TRUE), 
+                `Chase%` = mean(SwingCheck[ZoneCheck == FALSE], na.rm = TRUE), 
+                `Z-Whiff%` = mean(WhiffCheck[ZoneCheck == TRUE & SwingCheck == TRUE]),
+                `Whiff%` = mean(WhiffCheck[SwingCheck == TRUE], na.rm = TRUE), 
+                `Z-Swing%` = mean(SwingCheck[ZoneCheck == TRUE], na.rm = TRUE),
+                BBE = sum(BBECheck, na.rm = TRUE),
+                xDamage = mean(av_xwOBAcon[BBECheck == TRUE],  na.rm = TRUE),
+                AvgEV = mean(ExitSpeed[BBECheck == TRUE], na.rm = TRUE), 
+                AVG = H / AB,
+                OBP = (H + BB + HBP) / PA,
+                SLG = TB / AB) %>% 
+      mutate(`CSW%` = scales::percent(`CSW%`, accuracy = 0.1),
+             `Strike%` = scales::percent(`Strike%`, accuracy = 0.1),
+             `StrikeProb%` = scales::percent(`StrikeProb%`, accuracy = 0.1),
+             `Zone%` = scales::percent(`Zone%`, accuracy = 0.1),
+             `Chase%` = scales::percent(`Chase%`, accuracy = 0.1),
+             `Whiff%` = scales::percent(`Whiff%`, accuracy = 0.1),
+             `Z-Whiff%` = scales::percent(`Z-Whiff%`, accuracy = 0.1),
+             `Z-Swing%` = scales::percent(`Z-Swing%`, accuracy = 0.1),
+             `Swing%` = scales::percent(`Swing%`, accuracy = 0.1),
+             xDamage = sprintf("%.3f", xDamage),
+             xwOBA = sprintf("%.3f", xwOBA),
+             AvgEV = sprintf("%.1f", AvgEV),
+             AVG = sprintf("%.3f", AVG),
+             OBP = sprintf("%.3f", OBP),
+             SLG = sprintf("%.3f", SLG)) %>% 
+      select(Pitch, Side, Pitches, `CSW%`, `Zone%`, `Chase%`, `Whiff%`, 
+             `Z-Whiff%`, `Z-Swing%`, `Swing%`, xDamage, xwOBA, AvgEV, AVG, SLG)
+    
+    table[is.na(table)] <- "-"
+    
+    tableFilter <- reactive({table})
+    datatable(tableFilter(), options = list(dom = 't', columnDefs = list(list(targets = 0, visible = FALSE))))
+  })
+  
+  output$Batter_splits_table <- renderDataTable({
+    table <- FinalCSV
+    
+    if(input$BatterInput != "All") {
+      table <- table %>% filter(Batter %in% input$BatterInput)
+    }
+    
+    table <- table %>%
+      filter(between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>%
+      group_by('Side' = PitcherThrows) %>%
+      summarize('Pitches' = n(),
+                PA = sum(PACheck, na.rm = TRUE), 
+                AB = sum(ABCheck, na.rm = TRUE), 
+                H = sum(HCheck, na.rm = TRUE), 
+                `1B` = sum(SingleCheck, na.rm = TRUE), 
+                `2B` = sum(DoubleCheck, na.rm = TRUE), 
+                `3B` = sum(TripleCheck, na.rm = TRUE), 
+                HR = sum(HRCheck, na.rm = TRUE), 
+                TB = (`1B`) + (`2B` * 2) + (`3B` * 3) + (HR * 4),
+                SO = sum(StrikeoutCheck, na.rm = TRUE), 
+                BB = sum(WalkCheck, na.rm = TRUE), 
+                HBP = sum(HBPCheck, na.rm = TRUE),
+                xwOBA = round(mean(xwOBAvalues[PACheck == TRUE], na.rm = TRUE), 3),
+                `CSW%` = mean(CSWCheck, na.rm = TRUE), 
+                `Strike%` = mean(StrikeCheck, na.rm = TRUE), 
+                `StrikeProb%` = mean(called_strike_prob, na.rm = TRUE),
+                `Zone%` = mean(ZoneCheck, na.rm = TRUE), 
+                `Swing%` = mean(SwingCheck, na.rm = TRUE), 
+                `Chase%` = mean(SwingCheck[ZoneCheck == FALSE], na.rm = TRUE), 
+                `Z-Whiff%` = mean(WhiffCheck[ZoneCheck == TRUE & SwingCheck == TRUE]),
+                `Whiff%` = mean(WhiffCheck[SwingCheck == TRUE], na.rm = TRUE), 
+                `Z-Swing%` = mean(SwingCheck[ZoneCheck == TRUE], na.rm = TRUE),
+                BBE = sum(BBECheck, na.rm = TRUE),
+                xDamage = mean(av_xwOBAcon[BBECheck == TRUE],  na.rm = TRUE),
+                NinetiethEV = round(quantile(ExitSpeed, na.rm = TRUE, probs = 0.9), 0), 
+                AVG = H / AB,
+                OBP = (H + BB + HBP) / PA,
+                SLG = TB / AB) %>% 
+      mutate(`CSW%` = scales::percent(`CSW%`, accuracy = 0.1),
+             `Strike%` = scales::percent(`Strike%`, accuracy = 0.1),
+             `StrikeProb%` = scales::percent(`StrikeProb%`, accuracy = 0.1),
+             `Zone%` = scales::percent(`Zone%`, accuracy = 0.1),
+             `Chase%` = scales::percent(`Chase%`, accuracy = 0.1),
+             `Whiff%` = scales::percent(`Whiff%`, accuracy = 0.1),
+             `Z-Whiff%` = scales::percent(`Z-Whiff%`, accuracy = 0.1),
+             `Z-Swing%` = scales::percent(`Z-Swing%`, accuracy = 0.1),
+             `Swing%` = scales::percent(`Swing%`, accuracy = 0.1),
+             xDamage = sprintf("%.3f", xDamage),
+             xwOBA = sprintf("%.3f", xwOBA),
+             NinetiethEV = sprintf("%.1f", NinetiethEV),
+             AVG = sprintf("%.3f", AVG),
+             OBP = sprintf("%.3f", OBP),
+             SLG = sprintf("%.3f", SLG)) %>% 
+      select(Side, Pitches, `CSW%`, `Zone%`, `Chase%`, `Whiff%`, 
+             `Z-Whiff%`, `Z-Swing%`, `Swing%`, xDamage, xwOBA, NinetiethEV, AVG, SLG)
+    
+    table[is.na(table)] <- "-"
+    
+    tableFilter <- reactive({table})
+    datatable(tableFilter(), options = list(dom = 't', columnDefs = list(list(targets = 0, visible = FALSE))))
+  })
+  
+  output$Batter_count_results <- renderDataTable({
+    table <- FinalCSV
+    
+    if(input$BatterInput != "All") {
+      table <- table %>% filter(Batter %in% input$BatterInput)
+    }
+    
+    table <- table %>%
+      filter(between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>%
+      group_by(Count) %>%
+      summarize('Pitches' = n(),
+                PA = sum(PACheck, na.rm = TRUE), 
+                AB = sum(ABCheck, na.rm = TRUE), 
+                H = sum(HCheck, na.rm = TRUE), 
+                `1B` = sum(SingleCheck, na.rm = TRUE), 
+                `2B` = sum(DoubleCheck, na.rm = TRUE), 
+                `3B` = sum(TripleCheck, na.rm = TRUE), 
+                HR = sum(HRCheck, na.rm = TRUE), 
+                TB = (`1B`) + (`2B` * 2) + (`3B` * 3) + (HR * 4),
+                SO = sum(StrikeoutCheck, na.rm = TRUE), 
+                BB = sum(WalkCheck, na.rm = TRUE), 
+                HBP = sum(HBPCheck, na.rm = TRUE),
+                xwOBA = round(mean(xwOBAvalues[PACheck == TRUE], na.rm = TRUE), 3),
+                `CSW%` = mean(CSWCheck, na.rm = TRUE), 
+                `Strike%` = mean(StrikeCheck, na.rm = TRUE), 
+                `StrikeProb%` = mean(called_strike_prob, na.rm = TRUE),
+                `Zone%` = mean(ZoneCheck, na.rm = TRUE), 
+                `Swing%` = mean(SwingCheck, na.rm = TRUE), 
+                `Chase%` = mean(SwingCheck[ZoneCheck == FALSE], na.rm = TRUE), 
+                `Z-Whiff%` = mean(WhiffCheck[ZoneCheck == TRUE & SwingCheck == TRUE]),
+                `Whiff%` = mean(WhiffCheck[SwingCheck == TRUE], na.rm = TRUE), 
+                `Z-Swing%` = mean(SwingCheck[ZoneCheck == TRUE], na.rm = TRUE),
+                BBE = sum(BBECheck, na.rm = TRUE),
+                xDamage = mean(av_xwOBAcon[BBECheck == TRUE],  na.rm = TRUE),
+                AvgEV = mean(ExitSpeed[BBECheck == TRUE], na.rm = TRUE), 
+                AVG = H / AB,
+                OBP = (H + BB + HBP) / PA,
+                SLG = TB / AB) %>% 
+      mutate(`CSW%` = scales::percent(`CSW%`, accuracy = 0.1),
+             `Strike%` = scales::percent(`Strike%`, accuracy = 0.1),
+             `StrikeProb%` = scales::percent(`StrikeProb%`, accuracy = 0.1),
+             `Zone%` = scales::percent(`Zone%`, accuracy = 0.1),
+             `Chase%` = scales::percent(`Chase%`, accuracy = 0.1),
+             `Whiff%` = scales::percent(`Whiff%`, accuracy = 0.1),
+             `Z-Whiff%` = scales::percent(`Z-Whiff%`, accuracy = 0.1),
+             `Z-Swing%` = scales::percent(`Z-Swing%`, accuracy = 0.1),
+             `Swing%` = scales::percent(`Swing%`, accuracy = 0.1),
+             xDamage = sprintf("%.3f", xDamage),
+             xwOBA = sprintf("%.3f", xwOBA),
+             AvgEV = sprintf("%.1f", AvgEV),
+             AVG = sprintf("%.3f", AVG),
+             OBP = sprintf("%.3f", OBP),
+             SLG = sprintf("%.3f", SLG)) %>% 
+      select(Count, Pitches, `CSW%`, `Zone%`, `Chase%`, `Whiff%`, 
+             `Z-Whiff%`, `Z-Swing%`, `Swing%`, xDamage, xwOBA, AvgEV, AVG, SLG)
+    
+    table[is.na(table)] <- "-"
+    
+    tableFilter <- reactive({table})
+    datatable(tableFilter(), options = list(dom = 't', pageLength = nrow(tableFilter()), columnDefs = list(list(targets = 0, visible = FALSE))))
+    
+  })
+  
+  output$angle_vs_speed <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput, 
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2]))
+    })
+    ggplot(data = dataFilter(), aes(x = ExitSpeed, y = Angle, color = TaggedHitType)) + 
+      labs(x = "Exit Speed (mph)", y = "Launch Angle (degrees)", color = "Hit Type", title = "Angle") + 
+      xlim(50, 120) + ylim(-50, 50) +
+      geom_segment(aes(x = 0, y = -25, xend = 0, yend = 25), size = 1, color = "grey55") + 
+      geom_segment(aes(x = 50, y = 0, xend = 120, yend = 0), size = 1, color = "grey55") +
+      geom_point(size = 3, na.rm = TRUE) +
+      theme_bw() + theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+      theme(legend.position = "bottom", legend.text = element_text(size = 12), axis.title = element_text(size = 14))
+  }, width = 450, height = 400)
+  
+  output$umpire_analysis <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput, 
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2]),
+               PitchCall == "BallCalled" | PitchCall == "StrikeCalled" | PitchCall == "BallinDirt")
+    })
+    ggplot(data = dataFilter(), aes(x = PlateLocSide, y = PlateLocHeight, color = PitchCall)) +
+      geom_point(size = 3) +
+      theme_bw() +
+      labs(x = "PlateLocSide", y = "PlateLocHeight",
+           fill = "Called Strike Probability") +
+      annotate("rect", xmin = -1, xmax = 1,
+               ymin = 1.6, ymax = 3.4,
+               fill= NA, color= "black", 
+               alpha = .1) +
+      ylim(1.2, 3.8) +
+      xlim(-1.6, 1.6)
+  }, width = 450, height = 450)
+  
+  output$bearing_vs_speed <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput, 
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2]))
+    })
+    ggplot(data = dataFilter(), aes(x = Bearing, y = ExitSpeed, color = TaggedHitType)) +
+      labs(x = "Horizontal Bearing (degrees)", y = "Exit Speed (mph)", color = " ", title = "Bearing") + 
+      xlim(-50, 50) + ylim(50, 120) +
+      geom_segment(aes(x = 0, y = -50, xend = 0, yend = 50), size = 1, color = "grey55") + 
+      geom_segment(aes(x = -50, y = 50, xend = -50, yend = 120), size = 1, color = "grey55") +
+      geom_segment(aes(x = 50, y = 50, xend = 50, yend = 120), size = 1, color = "grey55") +
+      geom_point(size = 3, na.rm = TRUE) +
+      theme_bw() + theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+      theme(legend.position = "bottom", legend.text = element_text(size = 12), axis.title = element_text(size = 14))
+  }, width = 450, height = 400)
+  
+  output$pitch_location_plot1 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2]))
+    }) 
+    ggplot(data = dataFilter(), aes(x = PlateLocSide, y = PlateLocHeight,color = TaggedHitType)) +
+      labs(x = "Horizontal Location", y = "Vertical Location", color = " ", title = "Location (All)", subtitle = "From the Pitcher's Perspective") +  
+      geom_point(size = 3)+
+      annotate("rect", xmin = -1, xmax = 1,
+               ymin = 1.6,ymax = 3.4,
+               fill= NA,color= "black", 
+               alpha = .1) +
+      ylim(1, 4) + xlim(-1.8, 1.8) + theme_bw() + 
+      theme_bw() + theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+      theme(legend.position = "bottom", legend.text = element_text(size = 12), axis.title = element_text(size = 14))
+  }, width = 400, height = 350)
+  
+  
+  output$pitch_location_plot2 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2]),
+               PitcherThrows == "Left")
+    }) 
+    ggplot(data = dataFilter(), aes(x = PlateLocSide, y = PlateLocHeight,color = TaggedHitType)) +
+      labs(x = "Horizontal Location", y = "Vertical Location", color = " ", title = "Location (LHP)", subtitle = "From the Pitcher's Perspective") + 
+      geom_point(size = 3)+
+      annotate("rect", xmin = -1, xmax = 1,
+               ymin = 1.6,ymax = 3.4,
+               fill= NA,color= "black", 
+               alpha = .1) +
+      ylim(1, 4) + xlim(-1.8, 1.8) + theme_bw() + 
+      theme_bw() + theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+      theme(legend.position = "bottom", legend.text = element_text(size = 12), axis.title = element_text(size = 14))
+  }, width = 400, height = 350)
+  
+  output$pitch_location_plot3 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2]),
+               PitcherThrows == "Right")
+    }) 
+    ggplot(data = dataFilter(), aes(x = PlateLocSide, y = PlateLocHeight,color = TaggedHitType)) +
+      labs(x = "Horizontal Location", y = "Vertical Location", color = " ", title = "Location (RHP)", subtitle = "From the Pitcher's Perspective") + 
+      geom_point(size = 3)+
+      annotate("rect", xmin = -1, xmax = 1,
+               ymin = 1.6,ymax = 3.4,
+               fill= NA,color= "black", 
+               alpha = .1) +
+      ylim(1, 4) + xlim(-1.8, 1.8) + theme_bw() + 
+      theme_bw() + theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+      theme(legend.position = "bottom", legend.text = element_text(size = 12), axis.title = element_text(size = 14))
+  }, width = 400, height = 350)
+  
+  output$lineplot1 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>% 
+        mutate(PitchNo = row_number())
+    })
+    ggplot(dataFilter(), aes(x = PitchNo, y = InducedVertBreak, color = TaggedPitchType)) + 
+      geom_line(size = 2) +
+      labs(x = "Pitch Count", y = "Induced Vertical Break", title = "IVB Over Time", color = "") +
+      ylim(-20, 30) + 
+      theme_bw() + theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold", size = 16)) +
+      theme(axis.title = element_text(size = 14), axis.text = element_text(size = 12))
+  }, width = 900, height = 400)
+  
+  output$lineplot3 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>% 
+        mutate(PitchNo = row_number())
+    })
+    ggplot(dataFilter(), aes(x = PitchNo, y = HorzBreak, color = TaggedPitchType)) + 
+      geom_line(size = 2) +
+      labs(x = "Pitch Count", y = "Horizontal Break", title = "HB Over Time", color = "") +
+      ylim(-25, 25) + 
+      theme_bw() + theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold", size = 16)) +
+      theme(axis.title = element_text(size = 14), axis.text = element_text(size = 12))
+  }, width = 900, height = 400)
+  
+  output$lineplot4 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>% 
+        mutate(PitchNo = row_number())
+    })
+    ggplot(dataFilter(), aes(x = PitchNo, y = SpinRate, color = TaggedPitchType)) + 
+      geom_line(size = 2) +
+      labs(x = "Pitch Count", y = "Spin Rate", title = "Spin Rate Over Time", color = "") +
+      ylim(0, 3500) + 
+      theme_bw() + theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold", size = 16)) +
+      theme(axis.title = element_text(size = 14), axis.text = element_text(size = 12))
+  }, width = 900, height = 400)
+  
+  
+  output$lineplot2 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2])) %>%
+        mutate(PitchNo = row_number())
+    })
+    ggplot(data = dataFilter()) + 
+      geom_line(aes(y = RelSpeed, x = PitchNo, color = TaggedPitchType), size = 2) + 
+      labs(x = "Pitch Count", y = "Pitch Velocity (MPH)", color = " ", title = "Pitch Velocity") + 
+      ylim(65, 95) + 
+      theme_bw() + theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5), axis.text = element_text(size = 12)) +
+      theme(legend.position = "bottom", legend.text = element_text(size = 12), axis.title = element_text(size = 14))
+  }, width = 900, height = 400)
+  
+  
+  output$plot1 <- renderPlot({
+    dataFilter <- reactive({
+      FinalCSV %>%
+        filter(Batter == input$BatterInput,
+               between(Date, input$DateRangeInput[1], input$DateRangeInput[2]))
+    })
+    ggplot(dataFilter(), aes(x = PlateLocSide, y = PlateLocHeight)) +
+      stat_density_2d(aes(fill = ..density..), geom = 'raster', contour = F) +
+      scale_fill_gradientn(colours = c("blue", "white", "red")) +
+      annotate("rect", xmin = -1, xmax = 1,
+               ymin = 1.6,ymax = 3.4,
+               fill= NA,color= "black", 
+               alpha = .1) +
+      ylim(1, 4) + xlim(-1.8, 1.8) + theme_bw() + 
+      theme_classic() +
+      xlab("Horizontal Pitch Location") +
+      ylab("Vertical Pitch Location") +
+      ggtitle("Pitch Location Heat Map", subtitle = "Pitcher's Perspective") +
+      facet_wrap(~PitchCall, ncol = 3) +
+      guides(fill = FALSE)
+  }, width = 700, height = 400)
+  
+  
+}
+
+shinyApp(ui = ui, server = server)
+
+
+# Publish in top right corner to push to website
