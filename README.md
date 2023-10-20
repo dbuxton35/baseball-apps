@@ -2,5 +2,3 @@
 Shiny apps for storing and displaying Trackman Data
 
 Huge credit to Mason McRae (@mason_mcrae on X) for the base of all of this, I basically copied his shiny app and added my stuff+ model and adjusted to to fit our specific needs.
-
-PS A lot of this coding is very unstructured but what I needed in the moment, still learning obviously
